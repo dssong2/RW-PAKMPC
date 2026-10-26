@@ -8,6 +8,7 @@ function m = quat_koopman(nphi, jc0, ts)
 %   m.bc(w, q)     Bc(q, w) of Eq. (15)
 %   m.b(w, q)      discrete B = G Bc(q, w)
 %   m.tau2u(w, tau), m.u2tau(w, u)   Eq. (8) input map
+%   m.t6           maps the output error C(z - z_ref) to [w; q_v], for the terminal weight
 
 n = 4*nphi + 7;
 ac = zeros(n);
@@ -21,6 +22,7 @@ m.name = 'Quaternion-based';
 m.n = n; m.nphi = nphi; m.ts = ts; m.jc0 = jc0; m.jinv = inv(jc0);
 m.ac = ac; m.a = e(1:n, 1:n); m.g = e(1:n, n+1:end);
 m.c = [eye(7) zeros(7, 4*nphi)];
+m.t6 = [eye(3) zeros(3, 4); zeros(3, 4) eye(3)];   % C z - C z_ref -> [w; q_v]
 m.lift = @(x) lift(x, nphi);
 m.bc = @(w, q) bc(w, q, m.jinv, nphi, n);
 m.b = @(w, q) m.g*bc(w, q, m.jinv, nphi, n);

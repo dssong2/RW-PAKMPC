@@ -20,6 +20,13 @@ m.name = 'DCM-based';
 m.n = n; m.nphi = nphi; m.ts = ts; m.jc0 = jc0; m.jinv = inv(jc0);
 m.ac = ac; m.a = e(1:n, 1:n); m.g = e(1:n, n+1:end);
 m.c = [eye(12) zeros(12, 9*nphi)];
+% C z - C z_ref -> [w; q_v], q_v ~ theta/2 with R ~ I + theta^x: theta = vee((R - R')/2)
+m.t6 = zeros(6, 12); m.t6(1:3, 1:3) = eye(3);
+ij = [3 2; 1 3; 2 1];
+for i = 1:3
+    m.t6(3 + i, 3 + sub2ind([3 3], ij(i, 1), ij(i, 2))) = 1/4;
+    m.t6(3 + i, 3 + sub2ind([3 3], ij(i, 2), ij(i, 1))) = -1/4;
+end
 m.lift = @(x) lift(x, nphi);
 m.bc = @(w, q) bc(w, q2r(q), m.jinv, nphi, n);
 m.b = @(w, q) m.g*bc(w, q2r(q), m.jinv, nphi, n);
