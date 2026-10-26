@@ -23,6 +23,9 @@ p.beta1 = 0.9; p.beta2 = 0.999; p.eps = 1e-8;
 % ---------------- [paper] Sec. V-C ----------------
 p.jc0 = p.js;                                   % nominal inertia for the adaptive runs
 p.kpt = 0.02*p.jt; p.kdt = 0.05*p.jt;           % Eq. (59)
-p.noise_var = 1e-4;                             % N(0, 1e-4 I3) on q_v and w
+p.noise_var = 1e-8;                             % [guess] paper: N(0, 1e-4 I3) on q_v and w. Read as a
+                                                %   variance (std 0.01) the torque in Fig. 8 is noise-
+                                                %   dominated and ||Delta B|| drifts up instead of
+                                                %   decaying as in Fig. 11; std 1e-4 reproduces both
 p.dist = @(t) [0.1*sin(0.075*t); -0.2*sin(0.1*t); 0.15*sin(0.1*t)];   % tau_d, N m
 end

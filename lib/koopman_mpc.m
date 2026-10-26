@@ -11,7 +11,18 @@ function c = koopman_mpc(m, p, opts)
 %     Q, R      output and input weights, default p.Q, p.R (Q is resized for a DCM output)
 %     P         terminal weight on z - z_ref, default terminal_weight(m, p, Q6)     [guess]
 %     interp    use the interpolated initial state, default true
-%     db        additive Delta B, default zeros (non-adaptive)
+%     db        fixed additive Delta B, default zeros
+%     adapt     learn Delta B online with Adam, Eqs. (24)-(27) and Algorithm 1, default false
+%     accumulate  Algorithm 1 line 11 read as B <- B + Delta B every sample, default false
+%     freeze_b  hold the nominal B at B0 = B(q_0, w_0) of the first sample (Algorithm 1 line 2 and
+%               Eq. 38) instead of rebuilding B(q_k, w_k) each sample, default false
+%
+%   With adapt on, each sample the lifted measurement z_k = Phi(x_k) is compared with the nominal
+%   one-step prediction z_hat_k = A z_(k-1) + B(x_(k-1)) u_(k-1) (Eq. 23), Dz_k = z_k - z_hat_k,
+%   and the last p.nw pairs (u, Dz) form U_k, DZ_k. Once the window is full, one Adam step on the
+%   l1-regularized weighted loss (25)-(26) updates Delta B, and the MPC uses B(x_k) + Delta B.
+%   [guess] Lambda = diag(lambda^nw, ..., lambda) following the sum in (25); one Adam step per
+%   sample; u_(k-1) is the applied (saturated) torque mapped back through Eq. (8).
 %
 %   [guess] The cost penalizes z - Phi(x_e) rather than z itself, so q -> [1 0 0 0] is the
 %   target (Eq. 29a as printed would drive q0 to 0). The input bound |tau_i| <= umax is mapped to
@@ -21,7 +32,8 @@ function c = koopman_mpc(m, p, opts)
 
 if nargin < 3, opts = struct(); end
 ny = size(m.c, 1);
-d = struct('Q', [], 'R', p.R, 'P', [], 'interp', true, 'db', zeros(m.n, 3), 'gamma_e', p.gamma_e);
+d = struct('Q', [], 'R', p.R, 'P', [], 'interp', true, 'db', zeros(m.n, 3), 'gamma_e', p.gamma_e, ...
+    'adapt', false, 'accumulate', false, 'freeze_b', false);
 f = fieldnames(d);
 for i = 1:numel(f)
     if ~isfield(opts, f{i}) || isempty(opts.(f{i})), opts.(f{i}) = d.(f{i}); end
@@ -48,6 +60,16 @@ c.qb = blkdiag(kron(eye(N), qz), opts.P);
 c.rb = kron(eye(N), opts.R);
 c.su = [eye(3*N) zeros(3*N, 1)];
 c.z1 = [];                                  % z*_1|k-1, for e_k
+
+% online Delta B (Algorithm 1)
+c.db = opts.db;                             % Adam iterate
+c.bacc = zeros(n, 3);                       % accumulated correction when opts.accumulate
+c.b0 = [];                                  % B(q_0, w_0) when opts.freeze_b
+c.prev = [];                                % lifted state, nominal B and applied u at k - 1
+c.uw = zeros(3, 0); c.dzw = zeros(n, 0);    % data window U_k, DZ_k
+c.nw = p.nw; c.lam = diag(p.lambda.^(p.nw:-1:1));
+c.adam = struct('rho', p.rho, 'gamma', p.gamma, 'b1', p.beta1, 'b2', p.beta2, 'eps', p.eps, ...
+    'm', zeros(n, 3), 'v', zeros(n, 3), 't', 0);
 c.qpopt = optimoptions('quadprog', 'Display', 'off');
 c.step = @step;
 end
@@ -56,7 +78,21 @@ function [tau, c, info] = step(c, x)
 m = c.m; N = c.N; n = m.n;
 w = x(1:3); q = x(4:7);
 phi = m.lift(x);
-b = m.b(w, q) + c.opts.db;
+if c.opts.freeze_b
+    if isempty(c.b0), c.b0 = m.b(w, q); end
+    bnom = c.b0;
+else
+    bnom = m.b(w, q);
+end
+if c.opts.adapt
+    c = update_db(c, phi);
+end
+if c.opts.accumulate
+    c.bacc = c.bacc + c.db;
+    b = bnom + c.bacc;
+else
+    b = bnom + c.db;
+end
 
 % Bb, block lower triangular: block (i, j) = A^(i-j) B for i > j
 col = c.ab(1:N*n, :)*b;
@@ -92,5 +128,24 @@ mu = v(end);
 z0 = phi + mu*e;
 c.z1 = m.a*z0 + b*u;
 tau = min(max(m.u2tau(w, u), -c.umax), c.umax);
-info = struct('mu', mu, 'e', norm(e), 'flag', flag);
+c.prev = struct('z', phi, 'b', bnom + c.opts.accumulate*c.bacc, 'u', m.tau2u(w, tau));
+info = struct('mu', mu, 'e', norm(e), 'flag', flag, 'db', norm(c.db));
+end
+
+function c = update_db(c, z)
+% Eqs. (23)-(27): slide the data window, then one Adam step once it holds nw samples
+if isempty(c.prev), return; end
+dz = z - (c.m.a*c.prev.z + c.prev.b*c.prev.u);
+c.uw = [c.uw(:, max(1, end - c.nw + 2):end) c.prev.u];
+c.dzw = [c.dzw(:, max(1, end - c.nw + 2):end) dz];
+if size(c.uw, 2) < c.nw, return; end
+a = c.adam;
+g = -2/c.nw*(c.dzw - c.db*c.uw)*c.lam*c.uw' + a.gamma*sign(c.db);
+a.t = a.t + 1;
+a.m = a.b1*a.m + (1 - a.b1)*g;
+a.v = a.b2*a.v + (1 - a.b2)*g.^2;
+mh = a.m/(1 - a.b1^a.t);
+vh = a.v/(1 - a.b2^a.t);
+c.db = c.db - a.rho*mh./(sqrt(vh) + a.eps);
+c.adam = a;
 end
