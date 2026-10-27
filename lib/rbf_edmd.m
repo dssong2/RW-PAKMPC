@@ -1,16 +1,18 @@
-function m = rbf_edmd(p, nrbf, seed)
+function m = rbf_edmd(p, nrbf, seed, jc)
 %RBF_EDMD  Data-driven Koopman model by EDMD with radial basis functions, Korda and Mezic [22].
 %   Lifted state z = [w; q; psi_1(x); ...; psi_nrbf(x)], size 7 + nrbf (57 for nrbf = 50 as in
 %   Sec. V-B), with thin-plate splines psi_i(x) = r^2 log r, r = ||D (x - c_i)||. A and B are fit by
 %   least squares to one-step data, z+ = A z + B tau, and C = [I7 0].
 %   [guess] The paper does not give the data set. Here: 200 trajectories of 100 samples from
 %   random attitudes and |w_i| <= 0.02 rad/s, inputs uniform in [-umax, umax] held per sample,
-%   simulated on the true inertia p.jc; centers drawn from the data; w scaled by 1/0.05.
+%   simulated on the inertia jc (default the true p.jc); centers drawn from the data; w scaled
+%   by 1/0.05. m.gram = [z; u][z; u]' of the fit, for continuing it by recursive least squares.
 %
 %   Same fields as quat_koopman (the input is tau itself, so tau2u and u2tau are identities).
 
 if nargin < 2, nrbf = 50; end
 if nargin < 3, seed = 1; end
+if nargin < 4, jc = p.jc; end
 rs = RandStream('mt19937ar', 'Seed', seed);
 ntraj = 200; len = 100;
 scale = [ones(3, 1)/0.05; ones(4, 1)];
@@ -22,7 +24,7 @@ for i = 1:ntraj
     xi = [0.02*(2*rand(rs, 3, 1) - 1); randq(rs)];
     for j = 1:len
         ui = p.umax*(2*rand(rs, 3, 1) - 1);
-        [~, xx] = ode45(@(s, y) attitude_ode(y, ui, p.jc), [0 p.ts/2 p.ts], xi, ode);
+        [~, xx] = ode45(@(s, y) attitude_ode(y, ui, jc), [0 p.ts/2 p.ts], xi, ode);
         k = k + 1;
         x(:, k) = xi; u(:, k) = ui;
         xi = xx(end, :)'; xi(4:7) = xi(4:7)/norm(xi(4:7));
@@ -37,7 +39,7 @@ ab = zp/[z; u];
 n = 7 + nrbf;
 
 m.name = 'RBF-based EDMD';
-m.n = n; m.nphi = nan; m.ts = p.ts; m.jc0 = p.jc;
+m.n = n; m.nphi = nan; m.ts = p.ts; m.jc0 = jc;
 m.a = ab(:, 1:n); m.bconst = ab(:, n+1:end);
 m.c = [eye(7) zeros(7, nrbf)];
 m.t6 = [eye(3) zeros(3, 4); zeros(3, 4) eye(3)];
@@ -45,6 +47,7 @@ m.lift = lift;
 m.b = @(w, q) m.bconst;
 m.tau2u = @(w, tau) tau;
 m.u2tau = @(w, u) u;
+m.gram = [z; u]*[z; u]';
 m.fit = norm(zp - ab*[z; u], 'fro')/norm(zp, 'fro');
 end
 

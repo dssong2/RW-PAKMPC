@@ -1,8 +1,8 @@
-%FIG6_11_TABLE3_ADAPTIVE  Figs. 6-11 and Table III of Sun et al.: PAKMPC against non-adaptive MPC
-%   on the combined spacecraft with inertia uncertainty (Jc0 = Js, plant Jc), the target torque of
-%   Eq. (59), the disturbance tau_d and measurement noise, Sec. V-C.
+%FIG6_11_TABLE3_ADAPTIVE  Figs. 6-11 and Table III of Sun et al.: PAKMPC against non-adaptive MPC,
+%   KMAE-AKMPC (kmae_akmpc) and INMPC (incremental_nmpc) on the combined spacecraft with inertia
+%   uncertainty (Jc0 = Js, plant Jc), the target torque of Eq. (59), the disturbance tau_d and
+%   measurement noise, Sec. V-C.
 %   Writes results/fig6_qv.png ... results/fig11_db.png and prints Table III.
-%   KMAE-AKMPC and INMPC (step 4) are added to the controllers list when they exist.
 %
 %   [paper] = quoted from the paper
 %   [guess] = not given in the paper, chosen here
@@ -21,7 +21,9 @@ plant = struct('dist', p.dist, 'target', true, 'noise', true, ...
 ssw = [190 200];                                % [guess] steady-state window, as in the Fig. 6 insets
 
 ctrl = {'Proposed PAKMPC', koopman_mpc(m, p, struct('adapt', true)), '-', [0.85 0.2 0.1];
-        'Non-adaptive MPC', koopman_mpc(m, p), '--', [0.2 0.4 0.85]};
+        'Non-adaptive MPC', koopman_mpc(m, p), '--', [0.2 0.4 0.85];
+        'KMAE-AKMPC', kmae_akmpc(p), '-.', [0.15 0.6 0.25];
+        'INMPC', incremental_nmpc(p), ':', [0.55 0.25 0.65]};
 nc = size(ctrl, 1);
 runs = cell(1, nc); rt = zeros(1, nc);
 for i = 1:nc
