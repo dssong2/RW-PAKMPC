@@ -14,6 +14,7 @@ function c = koopman_mpc(m, p, opts)
 %     db        fixed additive Delta B, default zeros
 %     adapt     learn Delta B online with Adam, Eqs. (24)-(27) and Algorithm 1, default false
 %     accumulate  Algorithm 1 line 11 read as B <- B + Delta B every sample, default false
+%     db_fn     @(w, q) -> Delta B used in place of the learned one (diagnostics), default []
 %     freeze_b  hold the nominal B at B0 = B(q_0, w_0) of the first sample (Algorithm 1 line 2 and
 %               Eq. 38) instead of rebuilding B(q_k, w_k) each sample, default false
 %
@@ -33,7 +34,7 @@ function c = koopman_mpc(m, p, opts)
 if nargin < 3, opts = struct(); end
 ny = size(m.c, 1);
 d = struct('Q', [], 'R', p.R, 'P', [], 'interp', true, 'db', zeros(m.n, 3), 'gamma_e', p.gamma_e, ...
-    'adapt', false, 'accumulate', false, 'freeze_b', false);
+    'adapt', false, 'accumulate', false, 'freeze_b', false, 'db_fn', []);
 f = fieldnames(d);
 for i = 1:numel(f)
     if ~isfield(opts, f{i}) || isempty(opts.(f{i})), opts.(f{i}) = d.(f{i}); end
@@ -86,6 +87,9 @@ else
 end
 if c.opts.adapt
     c = update_db(c, phi);
+end
+if ~isempty(c.opts.db_fn)
+    c.db = c.opts.db_fn(w, q);
 end
 if c.opts.accumulate
     c.bacc = c.bacc + c.db;
