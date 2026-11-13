@@ -22,10 +22,10 @@ dist_on     = 1;        % Sec. V-C external disturbance torque
 target_on   = 1;        % Eq. (59) competitive target PD torque
 drift_check = true;     % Run free-drift momentum check first
 
-% Reaction wheel sizing preset:
-%   'realistic_hr16' -> Realistic Honeywell HR16-class wheels (tau_max = 0.5 N*m, h_max = 50 N*m*s)
-%                       Shows clear actuator saturation & slower settling vs paper's 20 N*m ideal!
-%   'high_torque'    -> Over-sized wheels matched to paper's 20 N*m authority (tau_max = 15 N*m)
+% Reaction wheel sizing preset (values in rw_params.m):
+%   'realistic_hr16' -> Honeywell HR16-50 datasheet values (tau_max = 0.2 N*m, h_max = 50 N*m*s, 9.0 kg)
+%   'hr16_100'       -> Honeywell HR16-100, largest standard HR16 (tau_max = 0.2 N*m, h_max = 100 N*m*s, 12 kg)
+%   'high_torque'    -> Over-sized wheels matched to paper's 20 N*m authority (tau_max = 15 N*m). Not a real wheel.
 rw_preset = 'realistic_hr16';
 
 v = ver;
@@ -50,31 +50,11 @@ noise_var = 1e-4;                               % N(0, 1e-4) sensor noise varian
 settle_tol = 0.05;                              % 5% settling error margin
 
 % ---------------- Reaction Wheel Parameters (Tetrahedral 4-Wheel Array) ----------------
-beta = acos(1/sqrt(3));                         % Tetrahedral angle, 54.74 deg
-wt = [sin(beta) -sin(beta)  0          0;
-      cos(beta)  cos(beta)  cos(beta)  cos(beta);
-      0          0          sin(beta) -sin(beta)]; % Spin axes matrix W_T (3x4)
-wp = pinv(wt);                                  % Pseudo-inverse allocation matrix (4x3)
-
-switch rw_preset
-    case 'realistic_hr16'
-        jw     = 0.08;      % Rotor axial inertia J_w (kg m^2) [HR16-class for ~1155 kg sat]
-        mw     = 6.0;       % Rotor mass (kg)
-        taumax = 0.5;       % Max motor torque per wheel |M_m,i| <= 0.5 N m (vs 20 N m ideal)
-        hmax   = 50;        % Max momentum capacity per wheel |h_w,i| <= 50 N m s
-    case 'high_torque'
-        jw     = 0.15;      % Larger rotor inertia (kg m^2)
-        mw     = 8.0;       % Rotor mass (kg)
-        taumax = 15.0;      % High motor torque per wheel (N m)
-        hmax   = 100;       % Momentum capacity (N m s)
-    otherwise
-        error('Unknown rw_preset.');
-end
-jt_w  = jw / 2;                                 % Rotor transverse inertia (thin disk approx, kg m^2)
-cth   = 1e-4;                                   % Bearing viscous drag c_theta (N m s/rad)
-sigma_rw = 1e-4 * noise_on;                     % Wheel torque noise std (N m)
-b_rw     = 2e-4 * [1 -1 0.5 -0.5] * noise_on;   % Constant wheel torque bias (N m)
-sigd_rw  = 1e-5 * noise_on;                     % Wheel torque random-walk drift (N m / sqrt(s))
+addpath(here);
+rw = rw_params(rw_preset);   % sizing, mass, locked inertia, friction and torque error for the preset
+rw.ts = ts;
+rw.seed = 20;           % wheel noise seeds 21:24, drift seeds 31:34 (as before the swap), apart from sensor seeds 1:6
+if ~isfile(fullfile(here, 'rw_array_lib.slx')), build_rw_array; end
 
 % ---------------- Spacecraft Geometry & Inertia Accounting ----------------
 ls = sqrt(6*js(1,1)/ms);                        % Servicer cube side -> 1.5 m
@@ -84,33 +64,12 @@ r = [0; ls/2 + gap + lt(2)/2; 0];               % Target CoM relative to Service
 c = mt*r/(ms + mt);                             % Combined CoM in Servicer frame (m)
 kp = 40; kd = 400;                              % Stand-in PD gains
 
-% Wheel placement inside the 1.5 m servicer cube (tetrahedral cluster around Servicer center)
-rw_cluster_rad = 0.32;                          % Radial offset from servicer center (m)
-rw_cyl_rad     = 0.16;                          % Visual wheel cylinder radius (m)
-rw_cyl_len     = 0.06;                          % Visual wheel cylinder thickness (m)
-
-% Calculate inertia contributed by the 4 reaction wheels about the combined CoM
-% so we can subtract the non-axial wheel inertia from the residual appendage inertia
-% and keep total combined inertia equal to the paper's Jc!
+% Inertia about the combined CoM. The array block carries its own rotor mass and
+% locked inertia (rw.mass, rw.ilock about the servicer frame). The hull gets the rest of ms.
 pa = @(m, d) m*((d'*d)*eye(3) - d*(d'));
-j_wheels_locked = zeros(3,3);
-j_wheels_trans  = zeros(3,3);
-m_wheels_total  = 4 * mw;
-for i = 1:4
-    pos_w_sv = rw_cluster_rad * wt(:,i);        % Wheel i position in servicer frame
-    pos_w_cm = -c + pos_w_sv;                   % Wheel i position in combined CoM frame
-    iw_rot_locked = jt_w*(eye(3) - wt(:,i)*wt(:,i)') + jw*(wt(:,i)*wt(:,i)');
-    iw_rot_trans  = jt_w*(eye(3) - wt(:,i)*wt(:,i)');
-    j_wheels_locked = j_wheels_locked + iw_rot_locked + pa(mw, pos_w_cm);
-    j_wheels_trans  = j_wheels_trans  + iw_rot_trans  + pa(mw, pos_w_cm);
-end
-
-% Adjust servicer mass so total mass (servicer + wheels + target) remains ms + mt
-ms_hull = ms - m_wheels_total;
-jst = js + pa(ms_hull, -c) + jt + pa(mt, r - c) + j_wheels_locked;
+ms_hull = ms - rw.mass;
+jst = js + pa(ms_hull, -c) + jt + pa(mt, r - c) + rw.ilock + pa(rw.mass, -c);
 jres = jc - jst;
-% Effective body inertia when wheels are free to spin around their axes:
-j_body_eff = jc - (j_wheels_locked - j_wheels_trans);
 
 e = sort(eig((jres + jres')/2));
 fprintf('Appendage residual inertia principal moments: [%.2f %.2f %.2f] kg m^2\n', e);
@@ -199,74 +158,11 @@ for s = [-1 1]
         [0.85 0.65 0.15], 1.0, [820, 120 + 60*i]);
 end
 
-% ---------------- Tetrahedral 4-Wheel Assembly Inside Servicer ----------------
-mux_p = add_block('simulink/Signal Routing/Mux', [mdl '/pMux'], 'Inputs', '4', 'Position', [820 920 830 1120]);
-dmx_m = add_block('simulink/Signal Routing/Demux', [mdl '/MmDemux'], 'Outputs', '4', 'Position', [1320 920 1330 1120]);
-
-for i = 1:4
-    y = 900 + 110*(i-1);
-    rot_w = [null(wt(:,i)') wt(:,i)];
-    if det(rot_w) < 0, rot_w(:,1) = -rot_w(:,1); end
-    pos_w = rw_cluster_rad * wt(:,i);
-
-    % Rigid Transform from Servicer Center to Wheel i location & spin axis (+Z)
-    rt = add_block('sm_lib/Frames and Transforms/Rigid Transform', sprintf('%s/RW_RT%d', mdl, i), 'Position', pos(280, y));
-    sp(rt, {'RotationMethod'}, {'RotationMatrix', 'Rotation Matrix'});
-    sp(rt, {'RotationMatrix'}, {m(rot_w)});
-    sp(rt, {'TranslationMethod'}, {'Cartesian'});
-    sp(rt, {'TranslationCartesianOffset'}, {m(pos_w')});
-
-    % Revolute Joint for Wheel i
-    rev = add_block('sm_lib/Joints/Revolute Joint', sprintf('%s/Wheel Joint %d', mdl, i), 'Position', pos(400, y));
-    sp(rev, {'TorqueActuationMode'}, {'InputTorque', 'Provided by Input'});
-    sp(rev, {'MotionActuationMode'}, {'ComputedMotion', 'Automatically Computed'});
-    sp(rev, {'SenseVelocity'}, {'on'});
-    if sp(rev, {'DampingCoefficientUnits'}, {'N*m/(rad/s)'}, true)
-        sp(rev, {'DampingCoefficient'}, {num2str(cth, 17)});
-    else
-        sp(rev, {'DampingCoefficient'}, {num2str(cth*pi/180, 17)});
-    end
-
-    % Physical Wheel Inertia
-    whl = add_block('sm_lib/Body Elements/Inertia', sprintf('%s/Wheel %d', mdl, i), 'Position', pos(540, y));
-    sp(whl, {'InertiaType'}, {'Custom', 'CustomInertia'});
-    sp(whl, {'Mass'}, {num2str(mw, 17)});
-    sp(whl, {'MomentsOfInertia'}, {m([jt_w jt_w jw])});
-
-    % Visual Wheel Cylinder (Dark Gold/Orange Rotor)
-    cyl = add_block('sm_lib/Body Elements/Cylindrical Solid', sprintf('%s/Wheel Graphic %d', mdl, i), 'Position', pos(540, y-50));
-    sp(cyl, {'CylinderRadius'}, {num2str(rw_cyl_rad)});
-    sp(cyl, {'CylinderLength'}, {num2str(rw_cyl_len)});
-    sp(cyl, {'Density'}, {'1e-9'});
-    sp(cyl, {'GraphicDiffuseColor'}, {'[0.9 0.45 0.1]'}, true);
-
-    % Visual Spin Marker (Bright Red Spoke/Dot offset along X on the rotor face so spin is visible!)
-    mkt = add_block('sm_lib/Frames and Transforms/Rigid Transform', sprintf('%s/Marker Offset %d', mdl, i), 'Position', pos(630, y-50));
-    sp(mkt, {'TranslationMethod'}, {'Cartesian'});
-    sp(mkt, {'TranslationCartesianOffset'}, {m([0.55*rw_cyl_rad, 0, 0])});
-    mkb = add_block('sm_lib/Body Elements/Brick Solid', sprintf('%s/Spin Marker %d', mdl, i), 'Position', pos(710, y-50));
-    sp(mkb, {'BrickDimensions'}, {m([0.7*rw_cyl_rad, 0.22*rw_cyl_rad, 1.35*rw_cyl_len])});
-    sp(mkb, {'Density'}, {'1e-9'});
-    sp(mkb, {'GraphicDiffuseColor'}, {'[0.95 0.1 0.1]'}, true);
-
-    pso = add_block('nesl_utility/PS-Simulink Converter', sprintf('%s/p%d', mdl, i), 'Position', pos(680, y));
-    sp(pso, {'Unit'}, {'rad/s'});
-    spt_w = add_block('nesl_utility/Simulink-PS Converter', sprintf('%s/Mm%d', mdl, i), 'Position', pos(1380, y));
-    sp(spt_w, {'Unit'}, {'N*m'});
-
-    pr = get_param(rev, 'PortHandles');
-    add_line(mdl, sv, lc(rt, 1));
-    add_line(mdl, rc(rt, 1), pr.LConn(1));
-    add_line(mdl, pr.RConn(1), one(whl));
-    add_line(mdl, pr.RConn(1), one(cyl));
-    add_line(mdl, pr.RConn(1), lc(mkt, 1));
-    add_line(mdl, rc(mkt, 1), one(mkb));
-
-    add_line(mdl, pr.RConn(2), lc(pso, 1));
-    add_line(mdl, op(pso, 1), ip(mux_p, i));
-    add_line(mdl, op(dmx_m, i), ip(spt_w, 1));
-    add_line(mdl, rc(spt_w, 1), pr.LConn(2));
-end
+% ---------------- Reaction Wheel Array (rw_array_lib) ----------------
+load_system(fullfile(here, 'rw_array_lib'));
+arr = add_block('rw_array_lib/Reaction Wheel Array', [mdl '/Reaction Wheel Array'], 'Position', [1120 900 1280 1060]);
+kn  = add_block('simulink/Sources/Constant', [mdl '/kn'], 'Value', '0', 'Position', pos(1010, 1000));
+add_line(mdl, sv, lc(arr, 1));
 
 % ---------------- Sensing & Controller ----------------
 psq = add_block('nesl_utility/PS-Simulink Converter', [mdl '/Q'], 'Position', pos(280, 520));
@@ -278,7 +174,6 @@ add_line(mdl, ph.RConn(3), lc(psw, 1));
 
 zq = add_block('simulink/Discrete/Zero-Order Hold', [mdl '/ZOHq'], 'SampleTime', num2str(ts), 'Position', pos(400, 520));
 zw = add_block('simulink/Discrete/Zero-Order Hold', [mdl '/ZOHw'], 'SampleTime', num2str(ts), 'Position', pos(400, 590));
-zp = add_block('simulink/Discrete/Zero-Order Hold', [mdl '/ZOHp'], 'SampleTime', num2str(ts), 'Position', pos(870, 1000));
 
 nz = add_block('simulink/Sources/Random Number', [mdl '/Noise'], 'Mean', m(zeros(1,6)), ...
     'Variance', m(noise_var*ones(1,6)), 'Seed', m(1:6), 'SampleTime', num2str(ts), 'Position', pos(400, 660));
@@ -305,29 +200,6 @@ sat = add_block('simulink/Discontinuities/Saturation', [mdl '/Torque Limit'], 'U
 g_ideal = add_block('simulink/Math Operations/Gain', [mdl '/Ideal Direct Mode'], 'Gain', '0', 'Position', pos(1010, 540));
 g_rw    = add_block('simulink/Math Operations/Gain', [mdl '/RW Mode'], 'Gain', '1', 'Position', pos(1010, 940));
 
-% ---------------- Reaction Wheel Disturbances & Allocation ----------------
-nz_w = add_block('simulink/Sources/Random Number', [mdl '/RW Noise'], 'Mean', m(zeros(1,4)), ...
-    'Variance', m((sigma_rw^2 + 1e-30)*ones(1,4)), 'Seed', m(21:24), 'SampleTime', num2str(ts), 'Position', pos(800, 780));
-bs_w = add_block('simulink/Sources/Constant', [mdl '/RW Bias'], 'Value', m(b_rw), 'Position', pos(800, 840));
-dn_w = add_block('simulink/Sources/Random Number', [mdl '/RW Drift Inc'], 'Mean', m(zeros(1,4)), ...
-    'Variance', m((sigd_rw^2*ts + 1e-30)*ones(1,4)), 'Seed', m(31:34), 'SampleTime', num2str(ts), 'Position', pos(720, 900));
-di_w = add_block('simulink/Discrete/Discrete-Time Integrator', [mdl '/RW Drift'], 'SampleTime', num2str(ts), ...
-    'Position', pos(800, 900));
-sp(di_w, {'gainval'}, {num2str(1/ts, 17)});
-ds_w = add_block('simulink/Math Operations/Sum', [mdl '/Wheel Disturbance'], 'Inputs', '+++', 'Position', pos(910, 840));
-g_wdist = add_block('simulink/Math Operations/Gain', [mdl '/RW Dist On'], 'Gain', num2str(noise_on), 'Position', pos(970, 840));
-
-alloc = add_block('simulink/User-Defined Functions/MATLAB Function', [mdl '/RW Allocation'], 'Position', [1120 920 1270 1040]);
-setscript([mdl '/RW Allocation'], {
-    'function mm = alloc(u, dw, p)'
-    '% Maps desired 3-axis torque u into 4 tetrahedral wheels: M_m = -W_T^+ u - dw'
-    'u = u(:); dw = dw(:); p = p(:);'
-    ['wp = ' m(wp) ';']
-    sprintf('jw = %.17g; taumax = %.17g; hmax = %.17g;', jw, taumax, hmax)
-    'mm = -wp*u - dw;'
-    'mm = min(max(mm, -taumax), taumax);'
-    'mm(abs(jw*p) >= hmax & sign(mm) == sign(p)) = 0;'});
-
 % ---------------- Target Torque, Eq. (59), and External Disturbance ----------------
 tgt = add_block('simulink/User-Defined Functions/MATLAB Function', [mdl '/Target Torque'], 'Position', [560 720 680 780]);
 setscript([mdl '/Target Torque'], {
@@ -353,7 +225,6 @@ sp(spt_body, {'Unit'}, {'N*m'});
 % ---------------- Wire Signal Connections ----------------
 add_line(mdl, op(psq, 1), ip(zq, 1));
 add_line(mdl, op(psw, 1), ip(zw, 1));
-add_line(mdl, op(mux_p, 1), ip(zp, 1));
 add_line(mdl, op(nz, 1), ip(gn, 1));
 add_line(mdl, op(zq, 1), ip(sen, 1));
 add_line(mdl, op(zw, 1), ip(sen, 2));
@@ -362,20 +233,13 @@ add_line(mdl, op(sen, 1), ip(ctl, 1));
 add_line(mdl, op(sen, 2), ip(ctl, 2));
 add_line(mdl, op(ctl, 1), ip(sat, 1));
 
-% Branch saturated controller output to Ideal Direct path and RW Allocation path
+% Branch saturated controller output to Ideal Direct path and Reaction Wheel Array path
 add_line(mdl, op(sat, 1), ip(g_ideal, 1));
 add_line(mdl, op(sat, 1), ip(g_rw, 1));
 
-% Wire RW Disturbance & Allocation
-add_line(mdl, op(nz_w, 1), ip(ds_w, 1));
-add_line(mdl, op(bs_w, 1), ip(ds_w, 2));
-add_line(mdl, op(dn_w, 1), ip(di_w, 1));
-add_line(mdl, op(di_w, 1), ip(ds_w, 3));
-add_line(mdl, op(ds_w, 1), ip(g_wdist, 1));
-add_line(mdl, op(g_rw, 1), ip(alloc, 1));
-add_line(mdl, op(g_wdist, 1), ip(alloc, 2));
-add_line(mdl, op(zp, 1), ip(alloc, 3));
-add_line(mdl, op(alloc, 1), ip(dmx_m, 1));
+% Wire controller output to the Reaction Wheel Array
+add_line(mdl, op(g_rw, 1), ip(arr, 1));
+add_line(mdl, op(kn, 1), ip(arr, 2));
 
 % Wire External Body Torques (Ideal Direct + Target + Disturbance)
 add_line(mdl, op(psq, 1), ip(tgt, 1));
@@ -390,7 +254,7 @@ add_line(mdl, op(tsum, 1), ip(spt_body, 1));
 add_line(mdl, rc(spt_body, 1), ph.LConn(2));
 
 % ---------------- Workspace Loggers ----------------
-logs = {'q_log', psq, 1; 'w_log', psw, 1; 'p_log', mux_p, 1; 'mm_log', alloc, 1; 'u_log', sat, 1};
+logs = {'q_log', psq, 1; 'w_log', psw, 1; 'p_log', arr, 1; 'tau_log', arr, 3; 'sat_log', arr, 4; 'pwr_log', arr, 5; 'mm_log', arr, 6; 'u_log', sat, 1};
 for i = 1:size(logs, 1)
     lg = add_block('simulink/Sinks/To Workspace', [mdl '/' logs{i,1}], 'VariableName', logs{i,1}, ...
         'SaveFormat', 'Structure With Time', 'Position', pos(1460, 40 + 70*i));
@@ -404,12 +268,13 @@ save_system(mdl, fullfile(here, [mdl '.slx']));
 % =========================================================================
 if drift_check
     fprintf('\n--- Run 0: Free-Drift Angular Momentum Conservation Check ---\n');
-    set_param(g_ideal, 'Gain', '0'); set_param(g_rw, 'Gain', '0'); set_param(g_wdist, 'Gain', '0');
+    rw.dist = 0;
+    set_param(g_ideal, 'Gain', '0'); set_param(g_rw, 'Gain', '0');
     set_param(gt, 'Gain', '0'); set_param(gd, 'Gain', '0');
     out0 = sim(mdl, 'StopTime', '60');
     t0 = out0.q_log.time; q_d = sig(out0.q_log, 4); w_d = sig(out0.w_log, 3); p_d = sig(out0.p_log, 4);
-    hw_d = jw * p_d;
-    hb_d = j_body_eff * w_d' + wt * hw_d';
+    hw_d = rw.jw * p_d;
+    hb_d = jc * w_d' + rw.wt * hw_d';
     h_inert = zeros(3, numel(t0));
     for k = 1:numel(t0)
         h_inert(:,k) = q2r(q_d(k,:)) * hb_d(:,k);
@@ -426,7 +291,8 @@ end
 % RUN 1: IDEALIZED BLACK-BOX ACTUATION (ORIGINAL PAPER BASELINE)
 % =========================================================================
 fprintf('\n--- Run 1: Idealized Direct-Torque Actuation (Paper Baseline) ---\n');
-set_param(g_ideal, 'Gain', '1'); set_param(g_rw, 'Gain', '0'); set_param(g_wdist, 'Gain', '0');
+rw.dist = 0;
+set_param(g_ideal, 'Gain', '1'); set_param(g_rw, 'Gain', '0');
 set_param(gt, 'Gain', num2str(target_on)); set_param(gd, 'Gain', num2str(dist_on));
 out_ideal = sim(mdl, 'StopTime', num2str(tend));
 
@@ -444,7 +310,8 @@ fprintf('Idealized Direct Torque: steady-state |q_v| = %.2e, 5%% settling time =
 % RUN 2: REALISTIC TETRAHEDRAL REACTION WHEEL ACTUATION
 % =========================================================================
 fprintf('\n--- Run 2: Realistic Tetrahedral Reaction Wheel Actuation (%s) ---\n', rw_preset);
-set_param(g_ideal, 'Gain', '0'); set_param(g_rw, 'Gain', '1'); set_param(g_wdist, 'Gain', num2str(noise_on));
+rw.dist = noise_on;
+set_param(g_ideal, 'Gain', '0'); set_param(g_rw, 'Gain', '1');
 set_param(gt, 'Gain', num2str(target_on)); set_param(gd, 'Gain', num2str(dist_on));
 save_system(mdl); % Leave saved model in RW closed-loop mode
 out_rw = sim(mdl, 'StopTime', num2str(tend));
@@ -453,18 +320,20 @@ t_rw = out_rw.q_log.time;
 q_rw = sig(out_rw.q_log, 4);
 w_rw = sig(out_rw.w_log, 3);
 p_rw = sig(out_rw.p_log, 4);
+tau_rw_net = sig(out_rw.tau_log, 3);
+pwr_rw = sig(out_rw.pwr_log, 4);
 mm_rw = sig(out_rw.mm_log, 4);
-tm_rw = out_rw.mm_log.time;
-hw_rw = jw * p_rw;
+tmm_rw = out_rw.mm_log.time;
+tm_rw = out_rw.tau_log.time;
+hw_rw = rw.jw * p_rw;
 
 qn_rw = vecnorm(q_rw(:,2:4), 2, 2);
 k_rw = find(qn_rw > settle_tol*qn_rw(1), 1, 'last');
 tset_rw = t_rw(min(k_rw + 1, numel(t_rw)));
-mmc = interp1(tm_rw, mm_rw, t_rw, 'previous', 'extrap');
-energy_rw = trapz(t_rw, sum(abs(mmc .* p_rw), 2));
+energy_rw = trapz(out_rw.pwr_log.time, sum(abs(pwr_rw), 2));   % pwr_log has its own time base
 fprintf('Realistic RW Actuation:  steady-state |q_v| = %.2e, 5%% settling time = %.1f s\n', qn_rw(end), tset_rw);
 fprintf('Actuator Mechanical Energy: %.3e J | Peak Wheel Momentum |h_w|/h_max: %.2f\n', ...
-    energy_rw, max(abs(hw_rw(:)))/hmax);
+    energy_rw, max(abs(hw_rw(:)))/rw.hmax);
 
 % =========================================================================
 % PLOTS: SANITY CHECK COMPARISON (IDEAL PAPER vs REALISTIC REACTION WHEELS)
@@ -476,7 +345,7 @@ plot(t_rw, qn_rw, 'r-', 'LineWidth', 1.8); grid on;
 yline(settle_tol*qn_id(1), 'k:', '5% Settling Threshold');
 ylabel('Attitude Error ||q_v||_2');
 title(sprintf('Sanity Check: Ideal Black-Box Torque (Settled: %.1fs) vs Realistic RWs (Settled: %.1fs)', tset_id, tset_rw));
-legend('Idealized Black-Box (Paper, \tau_{max}=20 Nm)', sprintf('Tetrahedral RWs (\\tau_{w,max}=%.1f Nm)', taumax), 'Location', 'northeast');
+legend('Idealized Black-Box (Paper, \tau_{max}=20 Nm)', sprintf('Tetrahedral RWs (\\tau_{w,max}=%.1f Nm)', rw.taumax), 'Location', 'northeast');
 
 subplot(3,1,2);
 plot(t_id, vecnorm(w_id, 2, 2)*180/pi, 'b--', 'LineWidth', 1.8); hold on;
@@ -485,34 +354,40 @@ ylabel('Angular Rate ||\omega||_2 (deg/s)');
 legend('Idealized Black-Box', 'Realistic RWs', 'Location', 'northeast');
 
 subplot(3,1,3);
-tau_rw_net = (-wt * mm_rw')'; % Net 3-axis torque delivered to body by wheels
 stairs(tu_id, vecnorm(u_id, 2, 2), 'b--', 'LineWidth', 1.5); hold on;
 stairs(tm_rw, vecnorm(tau_rw_net, 2, 2), 'r-', 'LineWidth', 1.5); grid on;
 ylabel('Net Body Torque ||\tau||_2 (N m)'); xlabel('Time (s)');
-legend('Ideal Commanded ||u||_2', 'Actual RW Delivered ||-W_T M_m||_2', 'Location', 'northeast');
+legend('Ideal Commanded ||u||_2', 'Actual RW Delivered ||tau||_2', 'Location', 'northeast');
 
 % Detailed RW Telemetry Figure
-figure('Name', 'Tetrahedral Reaction Wheel Telemetry', 'Position', [160 120 850 750]);
-subplot(4,1,1);
+figure('Name', 'Tetrahedral Reaction Wheel Telemetry', 'Position', [160 80 850 900]);
+subplot(5,1,1);
 plot(t_rw, q_rw(:,2:4), 'LineWidth', 1.4); grid on;
 ylabel('q_v'); title('Closed-Loop Attitude Stabilization with Tetrahedral Reaction Wheels');
 legend('q_1', 'q_2', 'q_3');
 
-subplot(4,1,2);
+subplot(5,1,2);
 plot(t_rw, w_rw*180/pi, 'LineWidth', 1.4); grid on;
 ylabel('Body \omega (deg/s)'); legend('\omega_x', '\omega_y', '\omega_z');
 
-subplot(4,1,3);
+subplot(5,1,3);
 plot(t_rw, p_rw * 60 / (2*pi), 'LineWidth', 1.4); grid on;
 ylabel('Wheel Speed (RPM)'); legend('RW 1', 'RW 2', 'RW 3', 'RW 4');
 
-subplot(4,1,4);
-stairs(tm_rw, mm_rw, 'LineWidth', 1.4); hold on;
-yline([taumax -taumax], 'k--', 'Torque Limit'); grid on;
+subplot(5,1,4);
+plot(t_rw, hw_rw, 'LineWidth', 1.4); hold on;
+yline([rw.hmax -rw.hmax], 'k--', 'h_{max}'); grid on;
+ylabel('Wheel Momentum h_w (N m s)');
+legend('RW 1', 'RW 2', 'RW 3', 'RW 4');
+
+subplot(5,1,5);
+stairs(tmm_rw, mm_rw, 'LineWidth', 1.4); hold on;
+yline([rw.taumax -rw.taumax], 'k--', 'Torque Limit'); grid on;
 ylabel('Motor Torque M_m (N m)'); xlabel('Time (s)');
 legend('RW 1', 'RW 2', 'RW 3', 'RW 4');
 
 % ---------------- Helper Functions ----------------
+
 function f = addrt(mdl, parent, name, d, r, xy)
 b = add_block('sm_lib/Frames and Transforms/Rigid Transform', [mdl '/' name], 'Position', [xy xy + [50 40]]);
 if ~isempty(r)
