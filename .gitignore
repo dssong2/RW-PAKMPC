@@ -1,0 +1,8 @@
+slprj/
+*.slxc
+*.asv
+*.autosave
+# models are rebuilt by the build_*.m scripts
+*.slx
+# old single-wheel test harness, kept locally
+archive/
