@@ -1,0 +1,55 @@
+function m = koopman_nominal(nphi, Jc0)
+n = 4*nphi + 7;
+Ji = inv(Jc0);
+
+% A_c: q -> phi_1, phi_k -> phi_(k+1)
+ac = zeros(n);
+for k = 0:nphi - 1                       % k = 0 is the q block
+    r = 3 + 4*k + (1:4);                 % rows of q (k = 0) or phi_k
+    ac(r, r + 4) = eye(4);
+end
+
+m.n = n;
+m.ac = ac;
+m.Ji = Ji;
+m.Jc0 = Jc0;
+m.lift = @(x) lift(x, nphi);
+m.bc = @(x) bmat(x, nphi, Ji);
+m.u2tau = @(w, u) u - cross(w, Jc0*w);
+m.tau2u = @(w, tau) tau + cross(w, Jc0*w);
+
+end
+
+function z = lift(x, nphi)
+
+w = x(1:3);
+phi = x(4:7);
+O = omega_mat(w);
+z = zeros(4*nphi + 7, 1);
+z(1:7) = x;
+for k = 1:nphi
+    phi = O*phi;
+    z(3 + 4*k + (1:4)) = phi;
+end
+
+end
+
+function b = bmat(x, nphi, Ji)
+
+w = x(1:3); q = x(4:7);
+O = omega_mat(w);
+b = zeros(4*nphi + 7, 3);
+b(1:3, :) = Ji;
+for j = 1:3
+    M = omega_mat(Ji(:, j));             % Omega(J_j), linear in its argument
+    phi = q;                             % phi_(k-1), starting at phi_0 = q
+    s = M*q;                             % b_1
+    b(8:11, j) = s;
+    for k = 2:nphi
+        phi = O*phi;
+        s = O*s + M*phi;
+        b(3 + 4*k + (1:4), j) = s;
+    end
+end
+
+end
